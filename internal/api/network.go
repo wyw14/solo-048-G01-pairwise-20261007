@@ -74,6 +74,14 @@ func (a *App) overview(w http.ResponseWriter, _ *http.Request) {
 		pumpCommands[zone.ID] = a.Pumps.CommandsForZone(zone.ID)
 		sections[zone.ID] = a.Topology.SectionsForZone(zone.ID)
 	}
+	// 分支泄压/边界阀实时状态全部按目录枚举，不再硬编码单个分支的设备 ID。
+	reliefOpen := make(map[string]bool)
+	boundariesClosed := make(map[string]bool)
+	for _, branch := range a.Catalog.Branches() {
+		reliefOpen[branch.Relief] = a.Relief.IsOpen(branch.Relief)
+		boundariesClosed[branch.SupplyBoundary] = a.Boundaries.IsClosed(branch.SupplyBoundary)
+		boundariesClosed[branch.ReturnBoundary] = a.Boundaries.IsClosed(branch.ReturnBoundary)
+	}
 	stationDetails := make(map[string]any)
 	for _, item := range a.Stations.List() {
 		lastCommand, _ := a.StationCommands.Last(item.ID)
@@ -87,16 +95,13 @@ func (a *App) overview(w http.ResponseWriter, _ *http.Request) {
 	}
 	primaryAdmission, primaryOpen := a.Primary.Admission("xincheng", "B")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"zones": a.Network.List(), "stations": a.Stations.List(), "incidents": a.Protection.List(),
+		"catalog_version": a.Catalog.Version(),
+		"zones":           a.Network.List(), "stations": a.Stations.List(), "incidents": a.Protection.List(),
 		"isolations": a.Isolation.List(), "plans": a.Planner.Plans(), "audit_summary": auditSummary,
 		"event_count": eventCount, "hydraulic_threshold": a.Balancer.Threshold(),
 		"interlocks": interlocks, "pump_commands": pumpCommands, "sections": sections,
 		"station_details": stationDetails, "hydraulic_incidents": a.LeakDetector.Incidents(),
-		"east_relief_open": a.Relief.IsOpen("east-rv"),
-		"east_boundaries_closed": map[string]bool{
-			"east-bv-a": a.Boundaries.IsClosed("east-bv-a"),
-			"east-bv-b": a.Boundaries.IsClosed("east-bv-b"),
-		},
+		"relief_open": reliefOpen, "boundaries_closed": boundariesClosed,
 		"target_primary_admission": map[string]any{"open": primaryOpen, "proof": primaryAdmission},
 	})
 }

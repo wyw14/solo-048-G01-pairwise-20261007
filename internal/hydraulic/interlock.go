@@ -4,29 +4,40 @@ import (
 	"fmt"
 	"sync"
 
+	"heatpulse/internal/assets"
 	"heatpulse/internal/network"
 )
 
 type Candidate struct {
-	PumpStage  int  `json:"pump_stage"`
-	BypassOpen bool `json:"bypass_open"`
+	PumpStage      int            `json:"pump_stage"`
+	BypassOpen     bool           `json:"bypass_open"`
+	CatalogVersion assets.Version `json:"catalog_version"`
 }
 
 type Interlock struct {
-	state *network.State
-	mu    sync.Mutex
+	state   *network.State
+	catalog *assets.Catalog
+	mu      sync.Mutex
 }
 
-func NewInterlock(state *network.State) *Interlock {
-	return &Interlock{state: state}
+// NewInterlock 基于网络运行态与唯一资产目录构建联锁：
+// 分区身份、挂接泵均以目录为准，联锁输出统一加盖目录版本。
+func NewInterlock(state *network.State, catalog *assets.Catalog) *Interlock {
+	return &Interlock{state: state, catalog: catalog}
 }
+
+// CatalogVersion 返回联锁当前引用的目录版本。
+func (i *Interlock) CatalogVersion() assets.Version { return i.catalog.Version() }
 
 func (i *Interlock) Snapshot(zoneID string) (Candidate, error) {
+	if _, ok := i.catalog.Zone(zoneID); !ok {
+		return Candidate{}, fmt.Errorf("zone %s not found in asset catalog", zoneID)
+	}
 	zone, ok := i.state.Get(zoneID)
 	if !ok {
 		return Candidate{}, fmt.Errorf("zone %s not found", zoneID)
 	}
-	return Candidate{PumpStage: zone.PumpStage, BypassOpen: zone.BypassOpen}, nil
+	return Candidate{PumpStage: zone.PumpStage, BypassOpen: zone.BypassOpen, CatalogVersion: i.catalog.Version()}, nil
 }
 
 func Validate(candidate Candidate) error {
@@ -43,7 +54,7 @@ func (i *Interlock) Transition(zoneID string, change func(Candidate) (Candidate,
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	return i.state.Update(zoneID, func(zone *network.Zone) error {
-		current := Candidate{PumpStage: zone.PumpStage, BypassOpen: zone.BypassOpen}
+		current := Candidate{PumpStage: zone.PumpStage, BypassOpen: zone.BypassOpen, CatalogVersion: i.catalog.Version()}
 		candidate, err := change(current)
 		if err != nil {
 			return err

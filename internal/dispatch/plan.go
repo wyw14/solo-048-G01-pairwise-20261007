@@ -1,6 +1,10 @@
 package dispatch
 
-import "time"
+import (
+	"time"
+
+	"heatpulse/internal/assets"
+)
 
 type PlanStatus string
 
@@ -14,6 +18,7 @@ const (
 type Plan struct {
 	ID             string             `json:"id"`
 	SourceRevision uint64             `json:"source_revision"`
+	CatalogVersion assets.Version     `json:"catalog_version"`
 	Targets        map[string]float64 `json:"targets"`
 	Status         PlanStatus         `json:"status"`
 	CreatedAt      time.Time          `json:"created_at"`

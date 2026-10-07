@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"heatpulse/internal/assets"
 	"heatpulse/internal/audit"
 	"heatpulse/internal/dispatch"
 	"heatpulse/internal/exchanger"
@@ -22,12 +23,12 @@ import (
 
 type App struct {
 	DataDirectory        string
+	Catalog              *assets.Catalog
 	Events               *store.EventLog
 	Audit                *audit.Recorder
 	AuditQuery           *audit.Query
 	Network              *network.State
 	Topology             *network.Topology
-	NetworkRegistry      *network.Registry
 	Stations             *station.Registry
 	Snapshots            *store.StationSnapshotStore
 	Interlock            *hydraulic.Interlock
@@ -66,36 +67,26 @@ type App struct {
 }
 
 func NewApp(dataDirectory string) (*App, error) {
+	// 启动第一步：构建并校验唯一资产目录（供回水管端、安全隔离器件、跨表引用全覆盖）。
+	// 校验失败直接返回错误，阻止服务带着残缺拓扑启动。
+	catalog, err := assets.Build(assets.DefaultDefinition())
+	if err != nil {
+		return nil, err
+	}
+
 	events := store.NewEventLog(filepath.Join(dataDirectory, "events.jsonl"))
 	recorder := audit.NewRecorder(events)
-	zones := []network.Zone{
-		{ID: "north", Name: "北环", Phase: network.PhaseActive, PumpStage: 2, BypassOpen: true, SupplyPressure: 0.82, ReturnPressure: 0.48},
-		{ID: "east", Name: "东支线", Phase: network.PhaseActive, PumpStage: 2, BypassOpen: true, SupplyPressure: 0.76, ReturnPressure: 0.45},
-		{ID: "west", Name: "西区", Phase: network.PhaseActive, PumpStage: 2, BypassOpen: true, SupplyPressure: 0.79, ReturnPressure: 0.46},
-	}
-	networkState := network.NewState(zones)
-	topology := network.NewTopology([]network.Section{
-		{ID: "east-branch", ZoneID: "east", Upstream: "east-supply", Downstream: "east-return", BoundaryValves: []string{"east-bv-a", "east-bv-b"}, ReliefValve: "east-rv"},
-		{ID: "west-loop", ZoneID: "west", Upstream: "west-supply", Downstream: "west-return", BoundaryValves: []string{"west-bv-a", "west-bv-b"}, ReliefValve: "west-rv"},
-	})
+
+	// 分区运行态、分支拓扑、站点绑定、站点注册表均由同一目录派生，避免拓扑多处各存一份。
+	networkState := network.NewState(zonesFromCatalog(catalog))
+	topology := network.NewTopology(topologyFromCatalog(catalog))
 	if err := topology.Validate(); err != nil {
 		return nil, err
 	}
-	stationItems := []station.Station{
-		{ID: "xincheng", Name: "新城站", ZoneID: "north", Online: true, TargetCelsius: 68, TargetRevision: 1, ControllerEpoch: 1, Exchangers: map[string]station.ExchangerPhase{"A": station.ExchangerCarrying, "B": station.ExchangerStandby}},
-		{ID: "binhe", Name: "滨河站", ZoneID: "east", Online: true, TargetCelsius: 66, TargetRevision: 1, ControllerEpoch: 1, Exchangers: map[string]station.ExchangerPhase{"A": station.ExchangerCarrying, "B": station.ExchangerStandby}},
-		{ID: "nanhu", Name: "南湖站", ZoneID: "west", Online: true, TargetCelsius: 64, TargetRevision: 1, ControllerEpoch: 1, Exchangers: map[string]station.ExchangerPhase{"A": station.ExchangerCarrying, "B": station.ExchangerStandby}},
-		{ID: "xijiao", Name: "西郊站", ZoneID: "west", Online: true, TargetCelsius: 65, TargetRevision: 1, ControllerEpoch: 1, Exchangers: map[string]station.ExchangerPhase{"A": station.ExchangerCarrying, "B": station.ExchangerStandby}},
-	}
-	stations := station.NewRegistry(stationItems)
-	networkRegistry := network.NewRegistry([]network.StationBinding{
-		{StationID: "xincheng", ZoneID: "north", Required: true},
-		{StationID: "binhe", ZoneID: "east", Required: true},
-		{StationID: "nanhu", ZoneID: "west", Required: true},
-		{StationID: "xijiao", ZoneID: "west", Required: true},
-	})
+	stations := station.NewRegistry(stationsFromCatalog(catalog))
+
 	snapshots := store.NewStationSnapshotStore(dataDirectory)
-	interlock := hydraulic.NewInterlock(networkState)
+	interlock := hydraulic.NewInterlock(networkState, catalog)
 	pumpRunner := pump.NewRunner()
 	pressure := pump.NewPressureMonitor()
 	valveOperations := valve.NewOperations()
@@ -108,29 +99,31 @@ func NewApp(dataDirectory string) (*App, error) {
 	boundaries := valve.NewBoundaryService()
 	isolationService := isolation.NewService(topology, networkState, relief, boundaries, recorder)
 	targets := station.NewTargetService(stations)
-	planner := dispatch.NewPlanner(targets)
+	planner := dispatch.NewPlanner(targets, catalog)
 	dispatchBuffer := dispatch.NewBuffer()
 	stationCommands := station.NewCommandService(stations)
 	app := &App{
-		DataDirectory: dataDirectory, Events: events, Audit: recorder, AuditQuery: audit.NewQuery(events),
-		Network: networkState, Topology: topology, NetworkRegistry: networkRegistry, Stations: stations,
-		Snapshots: snapshots, Interlock: interlock, Pumps: pump.NewService(interlock, recorder),
-		PumpRunner: pumpRunner, Pressure: pressure, Valves: valve.NewService(interlock, recorder),
-		ValveOperations: valveOperations, Relief: relief, Boundaries: boundaries, Primary: primary,
+		DataDirectory: dataDirectory, Catalog: catalog, Events: events, Audit: recorder,
+		AuditQuery: audit.NewQuery(events), Network: networkState, Topology: topology,
+		Stations: stations, Snapshots: snapshots, Interlock: interlock,
+		Pumps: pump.NewService(interlock, recorder), PumpRunner: pumpRunner, Pressure: pressure,
+		Valves: valve.NewService(interlock, recorder), ValveOperations: valveOperations,
+		Relief: relief, Boundaries: boundaries, Primary: primary,
 		Telemetry: telemetry.NewSeries(128), FlowReceipts: flowReceipts,
 		Balancer: hydraulic.NewBalancer(0.28), LeakDetector: hydraulic.NewLeakDetector(),
 		Protection: protection.NewService(), Latches: protection.NewLatchStore(snapshots),
 		Frost: protection.NewFrostProtection(valveOperations), Circulation: circulation, Antifreeze: antifreeze,
 		Warmup: warmup, Isolation: isolationService, IsolationCoordinator: isolation.NewCoordinator(isolationService),
 		Targets: targets, Planner: planner, DispatchBuffer: dispatchBuffer, StationCommands: stationCommands,
-		Manual: station.NewManualService(valveOperations), Maintenance: station.NewMaintenanceService(stations, snapshots),
+		Manual:      station.NewManualService(valveOperations),
+		Maintenance: station.NewMaintenanceService(stations, catalog, snapshots),
 	}
 	app.SnapshotsBuilder = telemetry.NewSnapshotBuilder(app.Telemetry)
 	app.LeakProtection = protection.NewLeakProtection(app.LeakDetector)
 	app.ExchangerSwitch = exchanger.NewSwitchService(stations, flowReceipts, primary)
-	app.Publisher = dispatch.NewPublisher(planner, targets, recorder)
+	app.Publisher = dispatch.NewPublisher(planner, targets, catalog, recorder)
 	app.Reconnector = recovery.NewReconnector(dispatchBuffer, stations, stationCommands, recorder)
-	app.ZoneRecovery = recovery.NewZoneRecovery(networkState, networkRegistry, warmup, pressure)
+	app.ZoneRecovery = recovery.NewZoneRecovery(networkState, catalog, warmup, pressure)
 	if err := app.seed(); err != nil {
 		return nil, err
 	}

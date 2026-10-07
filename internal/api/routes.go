@@ -15,6 +15,7 @@ func (a *App) Handler() http.Handler {
 	router.Get("/healthz", a.health)
 	console.Register(router)
 	router.Route("/api/v1", func(api chi.Router) {
+		api.Get("/catalog", a.getCatalog)
 		api.Get("/overview", a.overview)
 		api.Get("/zones", a.listZones)
 		api.Post("/zones/{zoneID}/pump-stage", a.setPumpStage)
