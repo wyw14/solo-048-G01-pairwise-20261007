@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"time"
 
@@ -22,6 +24,7 @@ import (
 
 type App struct {
 	DataDirectory        string
+	Catalog              *network.Catalog
 	Events               *store.EventLog
 	Audit                *audit.Recorder
 	AuditQuery           *audit.Query
@@ -66,36 +69,62 @@ type App struct {
 }
 
 func NewApp(dataDirectory string) (*App, error) {
+	return NewAppWithCatalog(dataDirectory, seedCatalog())
+}
+
+// NewAppWithCatalog 使用指定资产目录装配应用，便于以不同目录做启动校验测试。
+func NewAppWithCatalog(dataDirectory string, catalog *network.Catalog) (*App, error) {
 	events := store.NewEventLog(filepath.Join(dataDirectory, "events.jsonl"))
 	recorder := audit.NewRecorder(events)
-	zones := []network.Zone{
-		{ID: "north", Name: "北环", Phase: network.PhaseActive, PumpStage: 2, BypassOpen: true, SupplyPressure: 0.82, ReturnPressure: 0.48},
-		{ID: "east", Name: "东支线", Phase: network.PhaseActive, PumpStage: 2, BypassOpen: true, SupplyPressure: 0.76, ReturnPressure: 0.45},
-		{ID: "west", Name: "西区", Phase: network.PhaseActive, PumpStage: 2, BypassOpen: true, SupplyPressure: 0.79, ReturnPressure: 0.46},
+	// 资产目录是恢复、联锁、调度、运维共同引用的唯一数据源；
+	// 启动时先校验，校验失败直接中止启动。
+	if issues := catalog.ValidationIssues(); len(issues) > 0 {
+		causes := make([]error, 0, len(issues))
+		for _, issue := range issues {
+			causes = append(causes, issue)
+		}
+		return nil, fmt.Errorf("asset catalog %s failed startup validation: %w", catalog.Version(), errors.Join(causes...))
+	}
+	zoneSeeds := map[string]network.Zone{
+		"north": {Name: "北环", Phase: network.PhaseActive, PumpStage: 2, BypassOpen: true, SupplyPressure: 0.82, ReturnPressure: 0.48},
+		"east":  {Name: "东支线", Phase: network.PhaseActive, PumpStage: 2, BypassOpen: true, SupplyPressure: 0.76, ReturnPressure: 0.45},
+		"west":  {Name: "西区", Phase: network.PhaseActive, PumpStage: 2, BypassOpen: true, SupplyPressure: 0.79, ReturnPressure: 0.46},
+	}
+	zones := make([]network.Zone, 0, len(catalog.Snapshot().Zones))
+	for _, asset := range catalog.Snapshot().Zones {
+		seed := zoneSeeds[asset.ID]
+		seed.ID = asset.ID
+		if seed.Name == "" {
+			seed.Name = asset.Name
+		}
+		zones = append(zones, seed)
 	}
 	networkState := network.NewState(zones)
-	topology := network.NewTopology([]network.Section{
-		{ID: "east-branch", ZoneID: "east", Upstream: "east-supply", Downstream: "east-return", BoundaryValves: []string{"east-bv-a", "east-bv-b"}, ReliefValve: "east-rv"},
-		{ID: "west-loop", ZoneID: "west", Upstream: "west-supply", Downstream: "west-return", BoundaryValves: []string{"west-bv-a", "west-bv-b"}, ReliefValve: "west-rv"},
-	})
+	// 拓扑分支与站点绑定均从目录派生，保证与目录同一版本。
+	topology := network.NewTopology(catalog.Sections())
 	if err := topology.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("asset catalog %s derived topology: %w", catalog.Version(), err)
 	}
-	stationItems := []station.Station{
-		{ID: "xincheng", Name: "新城站", ZoneID: "north", Online: true, TargetCelsius: 68, TargetRevision: 1, ControllerEpoch: 1, Exchangers: map[string]station.ExchangerPhase{"A": station.ExchangerCarrying, "B": station.ExchangerStandby}},
-		{ID: "binhe", Name: "滨河站", ZoneID: "east", Online: true, TargetCelsius: 66, TargetRevision: 1, ControllerEpoch: 1, Exchangers: map[string]station.ExchangerPhase{"A": station.ExchangerCarrying, "B": station.ExchangerStandby}},
-		{ID: "nanhu", Name: "南湖站", ZoneID: "west", Online: true, TargetCelsius: 64, TargetRevision: 1, ControllerEpoch: 1, Exchangers: map[string]station.ExchangerPhase{"A": station.ExchangerCarrying, "B": station.ExchangerStandby}},
-		{ID: "xijiao", Name: "西郊站", ZoneID: "west", Online: true, TargetCelsius: 65, TargetRevision: 1, ControllerEpoch: 1, Exchangers: map[string]station.ExchangerPhase{"A": station.ExchangerCarrying, "B": station.ExchangerStandby}},
+	targetCelsius := stationTargets()
+	stationItems := make([]station.Station, 0, len(catalog.Snapshot().Stations))
+	for _, asset := range catalog.Snapshot().Stations {
+		exchangers := make(map[string]station.ExchangerPhase, len(catalog.ExchangersForStation(asset.ID)))
+		for index, exchangerID := range catalog.ExchangersForStation(asset.ID) {
+			if index == 0 {
+				exchangers[exchangerID] = station.ExchangerCarrying
+			} else {
+				exchangers[exchangerID] = station.ExchangerStandby
+			}
+		}
+		stationItems = append(stationItems, station.Station{
+			ID: asset.ID, Name: asset.Name, ZoneID: asset.ZoneID, Online: true,
+			TargetCelsius: targetCelsius[asset.ID], TargetRevision: 1, ControllerEpoch: 1, Exchangers: exchangers,
+		})
 	}
 	stations := station.NewRegistry(stationItems)
-	networkRegistry := network.NewRegistry([]network.StationBinding{
-		{StationID: "xincheng", ZoneID: "north", Required: true},
-		{StationID: "binhe", ZoneID: "east", Required: true},
-		{StationID: "nanhu", ZoneID: "west", Required: true},
-		{StationID: "xijiao", ZoneID: "west", Required: true},
-	})
+	networkRegistry := network.NewRegistry(catalog.StationBindings())
 	snapshots := store.NewStationSnapshotStore(dataDirectory)
-	interlock := hydraulic.NewInterlock(networkState)
+	interlock := hydraulic.NewInterlock(networkState, catalog)
 	pumpRunner := pump.NewRunner()
 	pressure := pump.NewPressureMonitor()
 	valveOperations := valve.NewOperations()
@@ -108,11 +137,11 @@ func NewApp(dataDirectory string) (*App, error) {
 	boundaries := valve.NewBoundaryService()
 	isolationService := isolation.NewService(topology, networkState, relief, boundaries, recorder)
 	targets := station.NewTargetService(stations)
-	planner := dispatch.NewPlanner(targets)
+	planner := dispatch.NewPlanner(catalog, targets)
 	dispatchBuffer := dispatch.NewBuffer()
 	stationCommands := station.NewCommandService(stations)
 	app := &App{
-		DataDirectory: dataDirectory, Events: events, Audit: recorder, AuditQuery: audit.NewQuery(events),
+		DataDirectory: dataDirectory, Catalog: catalog, Events: events, Audit: recorder, AuditQuery: audit.NewQuery(events),
 		Network: networkState, Topology: topology, NetworkRegistry: networkRegistry, Stations: stations,
 		Snapshots: snapshots, Interlock: interlock, Pumps: pump.NewService(interlock, recorder),
 		PumpRunner: pumpRunner, Pressure: pressure, Valves: valve.NewService(interlock, recorder),
@@ -123,14 +152,14 @@ func NewApp(dataDirectory string) (*App, error) {
 		Frost: protection.NewFrostProtection(valveOperations), Circulation: circulation, Antifreeze: antifreeze,
 		Warmup: warmup, Isolation: isolationService, IsolationCoordinator: isolation.NewCoordinator(isolationService),
 		Targets: targets, Planner: planner, DispatchBuffer: dispatchBuffer, StationCommands: stationCommands,
-		Manual: station.NewManualService(valveOperations), Maintenance: station.NewMaintenanceService(stations, snapshots),
+		Manual: station.NewManualService(valveOperations), Maintenance: station.NewMaintenanceService(stations, catalog, snapshots),
 	}
 	app.SnapshotsBuilder = telemetry.NewSnapshotBuilder(app.Telemetry)
 	app.LeakProtection = protection.NewLeakProtection(app.LeakDetector)
 	app.ExchangerSwitch = exchanger.NewSwitchService(stations, flowReceipts, primary)
 	app.Publisher = dispatch.NewPublisher(planner, targets, recorder)
-	app.Reconnector = recovery.NewReconnector(dispatchBuffer, stations, stationCommands, recorder)
-	app.ZoneRecovery = recovery.NewZoneRecovery(networkState, networkRegistry, warmup, pressure)
+	app.Reconnector = recovery.NewReconnector(dispatchBuffer, stations, catalog, stationCommands, recorder)
+	app.ZoneRecovery = recovery.NewZoneRecovery(networkState, catalog, warmup, pressure)
 	if err := app.seed(); err != nil {
 		return nil, err
 	}

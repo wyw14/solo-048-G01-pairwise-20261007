@@ -13,6 +13,7 @@ const (
 
 type Plan struct {
 	ID             string             `json:"id"`
+	CatalogVersion string             `json:"catalog_version"`
 	SourceRevision uint64             `json:"source_revision"`
 	Targets        map[string]float64 `json:"targets"`
 	Status         PlanStatus         `json:"status"`

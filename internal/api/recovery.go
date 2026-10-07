@@ -28,7 +28,7 @@ func (a *App) beginZoneRecovery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, zone)
+	writeJSON(w, http.StatusAccepted, map[string]any{"zone": zone, "catalog_version": a.Catalog.Version()})
 }
 
 func (a *App) connectRecoveryStation(w http.ResponseWriter, r *http.Request) {
@@ -44,7 +44,9 @@ func (a *App) connectRecoveryStation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"zone": zone, "readiness": a.ZoneRecovery.Readiness(zone.ID)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"zone": zone, "readiness": a.ZoneRecovery.Readiness(zone.ID), "catalog_version": a.Catalog.Version(),
+	})
 }
 
 func (a *App) recordRecoveryProofs(w http.ResponseWriter, r *http.Request) {
@@ -75,5 +77,7 @@ func (a *App) recordRecoveryProofs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"warmup": warmup, "pressure": pressure, "zone": zone})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"warmup": warmup, "pressure": pressure, "zone": zone, "catalog_version": a.Catalog.Version(),
+	})
 }

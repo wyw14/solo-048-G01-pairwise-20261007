@@ -5,11 +5,14 @@ import (
 	"sync"
 	"time"
 
+	"heatpulse/internal/network"
 	"heatpulse/internal/store"
 )
 
 type MaintenanceSession struct {
 	StationID      string    `json:"station_id"`
+	CatalogVersion string    `json:"catalog_version"`
+	ZoneID         string    `json:"zone_id"`
 	EnteredAt      time.Time `json:"entered_at"`
 	PreviousTarget float64   `json:"previous_target"`
 	PreviousHold   bool      `json:"previous_hold"`
@@ -18,13 +21,19 @@ type MaintenanceSession struct {
 
 type MaintenanceService struct {
 	registry  *Registry
+	catalog   *network.Catalog
 	snapshots *store.StationSnapshotStore
 	mu        sync.Mutex
 	sessions  map[string]MaintenanceSession
 }
 
-func NewMaintenanceService(registry *Registry, snapshots *store.StationSnapshotStore) *MaintenanceService {
-	return &MaintenanceService{registry: registry, snapshots: snapshots, sessions: make(map[string]MaintenanceSession)}
+func NewMaintenanceService(registry *Registry, catalog *network.Catalog, snapshots *store.StationSnapshotStore) *MaintenanceService {
+	return &MaintenanceService{registry: registry, catalog: catalog, snapshots: snapshots, sessions: make(map[string]MaintenanceSession)}
+}
+
+// CatalogVersion 返回运维页面引用的资产目录版本。
+func (s *MaintenanceService) CatalogVersion() string {
+	return s.catalog.Version()
 }
 
 func (s *MaintenanceService) Enter(stationID string) (MaintenanceSession, error) {
@@ -37,9 +46,13 @@ func (s *MaintenanceService) Enter(stationID string) (MaintenanceSession, error)
 	if !ok {
 		return MaintenanceSession{}, fmt.Errorf("station %s not found", stationID)
 	}
+	zoneID, ok := s.catalog.StationZone(stationID)
+	if !ok {
+		return MaintenanceSession{}, fmt.Errorf("station %s not present in catalog %s", stationID, s.catalog.Version())
+	}
 	session := MaintenanceSession{
-		StationID: stationID, EnteredAt: time.Now().UTC(), PreviousTarget: item.TargetCelsius,
-		PreviousHold: item.Hold, PreviousOnline: item.Online,
+		StationID: stationID, CatalogVersion: s.catalog.Version(), ZoneID: zoneID, EnteredAt: time.Now().UTC(),
+		PreviousTarget: item.TargetCelsius, PreviousHold: item.Hold, PreviousOnline: item.Online,
 	}
 	updated, err := s.registry.Update(stationID, func(current *Station) error {
 		current.Maintenance = true

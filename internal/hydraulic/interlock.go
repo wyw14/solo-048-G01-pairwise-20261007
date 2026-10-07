@@ -13,12 +13,18 @@ type Candidate struct {
 }
 
 type Interlock struct {
-	state *network.State
-	mu    sync.Mutex
+	state   *network.State
+	catalog *network.Catalog
+	mu      sync.Mutex
 }
 
-func NewInterlock(state *network.State) *Interlock {
-	return &Interlock{state: state}
+func NewInterlock(state *network.State, catalog *network.Catalog) *Interlock {
+	return &Interlock{state: state, catalog: catalog, mu: sync.Mutex{}}
+}
+
+// CatalogVersion 返回联锁所依据的资产目录版本。
+func (i *Interlock) CatalogVersion() string {
+	return i.catalog.Version()
 }
 
 func (i *Interlock) Snapshot(zoneID string) (Candidate, error) {
@@ -26,7 +32,19 @@ func (i *Interlock) Snapshot(zoneID string) (Candidate, error) {
 	if !ok {
 		return Candidate{}, fmt.Errorf("zone %s not found", zoneID)
 	}
+	if _, err := zoneCatalog(i.catalog, zoneID); err != nil {
+		return Candidate{}, err
+	}
 	return Candidate{PumpStage: zone.PumpStage, BypassOpen: zone.BypassOpen}, nil
+}
+
+func zoneCatalog(catalog *network.Catalog, zoneID string) (network.ZoneAsset, error) {
+	for _, zone := range catalog.Snapshot().Zones {
+		if zone.ID == zoneID {
+			return zone, nil
+		}
+	}
+	return network.ZoneAsset{}, fmt.Errorf("zone %s not present in catalog %s", zoneID, catalog.Version())
 }
 
 func Validate(candidate Candidate) error {
@@ -42,6 +60,9 @@ func Validate(candidate Candidate) error {
 func (i *Interlock) Transition(zoneID string, change func(Candidate) (Candidate, error)) (network.Zone, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	if _, err := zoneCatalog(i.catalog, zoneID); err != nil {
+		return network.Zone{}, err
+	}
 	return i.state.Update(zoneID, func(zone *network.Zone) error {
 		current := Candidate{PumpStage: zone.PumpStage, BypassOpen: zone.BypassOpen}
 		candidate, err := change(current)

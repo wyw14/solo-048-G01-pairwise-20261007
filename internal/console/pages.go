@@ -34,8 +34,9 @@ func servePage(w http.ResponseWriter, page, title string) {
 <title>HeatPulse - {{TITLE}}</title><link rel="stylesheet" href="/assets/app.css"></head>
 <body data-page="{{PAGE}}"><header><div><strong>HeatPulse</strong><span>城市供热联控</span></div>
 <nav><a href="/network">管网</a><a href="/stations">换热站</a><a href="/incidents">事故</a><a href="/dispatch">调度</a></nav></header>
-<main><section class="heading"><div><p>OPERATIONS / {{PAGE_UPPER}}</p><h1>{{TITLE}}</h1></div><span id="connection">连接中</span></section>
+<main><section class="heading"><div><p>OPERATIONS / {{PAGE_UPPER}}</p><h1>{{TITLE}}</h1></div><div class="badges"><span id="catalog-version">目录 -</span><span id="connection">连接中</span></div></section>
 <section id="summary" class="summary" aria-live="polite"></section><section><div class="section-title"><h2>实时状态</h2><button id="refresh" type="button">刷新</button></div><div id="content" class="grid"></div></section>
+<section id="catalog-panel" class="catalog-panel" hidden><div class="section-title"><h2>资产目录</h2></div><div id="catalog-content" class="grid"></div></section>
 </main><script src="/assets/app.js"></script></body></html>`
 	replacer := strings.NewReplacer("{{TITLE}}", title, "{{PAGE}}", page, "{{PAGE_UPPER}}", strings.ToUpper(page))
 	_, _ = w.Write([]byte(replacer.Replace(template)))

@@ -25,7 +25,7 @@ func (a *App) setPumpStage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"zone": zone, "command": command})
+	writeJSON(w, http.StatusOK, map[string]any{"zone": zone, "command": command, "catalog_version": a.Catalog.Version()})
 }
 
 func (a *App) setBypass(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +43,7 @@ func (a *App) setBypass(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"zone": zone, "command": command})
+	writeJSON(w, http.StatusOK, map[string]any{"zone": zone, "command": command, "catalog_version": a.Catalog.Version()})
 }
 
 func (a *App) isolateSection(w http.ResponseWriter, r *http.Request) {
@@ -85,18 +85,29 @@ func (a *App) overview(w http.ResponseWriter, _ *http.Request) {
 			"frost_valve_available": a.Frost.Available(item.ID + "-return"),
 		}
 	}
-	primaryAdmission, primaryOpen := a.Primary.Admission("xincheng", "B")
+	xinchengExchangers := a.Catalog.ExchangersForStation("xincheng")
+	standbyExchanger := ""
+	if len(xinchengExchangers) > 1 {
+		standbyExchanger = xinchengExchangers[1]
+	}
+	primaryAdmission, primaryOpen := a.Primary.Admission("xincheng", standbyExchanger)
+	eastReliefOpen := false
+	eastBoundaries := map[string]bool{}
+	if east, ok := a.Catalog.Branch("east-branch"); ok {
+		eastReliefOpen = a.Relief.IsOpen(east.ReliefValve)
+		for _, valveID := range east.BoundaryValves {
+			eastBoundaries[valveID] = a.Boundaries.IsClosed(valveID)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"catalog_version": a.Catalog.Version(), "catalog": a.Catalog.Snapshot(),
 		"zones": a.Network.List(), "stations": a.Stations.List(), "incidents": a.Protection.List(),
 		"isolations": a.Isolation.List(), "plans": a.Planner.Plans(), "audit_summary": auditSummary,
 		"event_count": eventCount, "hydraulic_threshold": a.Balancer.Threshold(),
 		"interlocks": interlocks, "pump_commands": pumpCommands, "sections": sections,
 		"station_details": stationDetails, "hydraulic_incidents": a.LeakDetector.Incidents(),
-		"east_relief_open": a.Relief.IsOpen("east-rv"),
-		"east_boundaries_closed": map[string]bool{
-			"east-bv-a": a.Boundaries.IsClosed("east-bv-a"),
-			"east-bv-b": a.Boundaries.IsClosed("east-bv-b"),
-		},
+		"east_relief_open":         eastReliefOpen,
+		"east_boundaries_closed":   eastBoundaries,
 		"target_primary_admission": map[string]any{"open": primaryOpen, "proof": primaryAdmission},
 	})
 }

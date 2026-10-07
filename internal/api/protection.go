@@ -72,7 +72,7 @@ func (a *App) enterMaintenance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, session)
+	writeJSON(w, http.StatusAccepted, map[string]any{"session": session, "catalog_version": a.Catalog.Version()})
 }
 
 func (a *App) exitMaintenance(w http.ResponseWriter, r *http.Request) {
@@ -81,5 +81,5 @@ func (a *App) exitMaintenance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, map[string]any{"station": result, "catalog_version": a.Catalog.Version()})
 }

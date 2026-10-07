@@ -6,35 +6,46 @@ import (
 
 	"heatpulse/internal/audit"
 	"heatpulse/internal/dispatch"
+	"heatpulse/internal/network"
 	"heatpulse/internal/station"
 )
 
 type ReplayResult struct {
-	StationID string            `json:"station_id"`
-	Epoch     uint64            `json:"epoch"`
-	Applied   []station.Command `json:"applied"`
-	Rejected  []station.Command `json:"rejected"`
-	At        time.Time         `json:"at"`
+	StationID      string            `json:"station_id"`
+	CatalogVersion string            `json:"catalog_version"`
+	Epoch          uint64            `json:"epoch"`
+	Applied        []station.Command `json:"applied"`
+	Rejected       []station.Command `json:"rejected"`
+	At             time.Time         `json:"at"`
 }
 
 type Reconnector struct {
 	buffer   *dispatch.Buffer
 	stations *station.Registry
+	catalog  *network.Catalog
 	commands *station.CommandService
 	audit    *audit.Recorder
 }
 
-func NewReconnector(buffer *dispatch.Buffer, stations *station.Registry, commands *station.CommandService, recorder *audit.Recorder) *Reconnector {
-	return &Reconnector{buffer: buffer, stations: stations, commands: commands, audit: recorder}
+func NewReconnector(buffer *dispatch.Buffer, stations *station.Registry, catalog *network.Catalog, commands *station.CommandService, recorder *audit.Recorder) *Reconnector {
+	return &Reconnector{buffer: buffer, stations: stations, catalog: catalog, commands: commands, audit: recorder}
+}
+
+// CatalogVersion 返回重连重放所依据的资产目录版本。
+func (r *Reconnector) CatalogVersion() string {
+	return r.catalog.Version()
 }
 
 func (r *Reconnector) Reconnect(stationID string, currentEpoch uint64) (ReplayResult, error) {
 	if _, ok := r.stations.Get(stationID); !ok {
 		return ReplayResult{}, fmt.Errorf("station %s not found", stationID)
 	}
+	if _, ok := r.catalog.StationZone(stationID); !ok {
+		return ReplayResult{}, fmt.Errorf("station %s not present in catalog %s", stationID, r.catalog.Version())
+	}
 	r.buffer.AcceptEpoch(stationID, currentEpoch)
 	ready, retired := r.buffer.Drain(stationID, currentEpoch)
-	result := ReplayResult{StationID: stationID, Epoch: currentEpoch, At: time.Now().UTC()}
+	result := ReplayResult{StationID: stationID, CatalogVersion: r.catalog.Version(), Epoch: currentEpoch, At: time.Now().UTC()}
 	for _, buffered := range retired {
 		result.Rejected = append(result.Rejected, station.Command{
 			ID: buffered.CommandID, StationID: buffered.StationID, Epoch: buffered.Epoch,
